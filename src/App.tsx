@@ -107,7 +107,7 @@ function App() {
             </div>
             <div className="flex-1 overflow-hidden">
               <p className="text-sm font-medium text-white truncate">Patrick Abanto</p>
-              <p className="text-xs text-gray-500 truncate">Practicante de Logística</p>
+              <p className="text-xs text-gray-500 truncate">Administrador</p>
             </div>
             <button className="text-gray-500 hover:text-white transition-colors">
               <svg fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
