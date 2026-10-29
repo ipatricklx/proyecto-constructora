@@ -46,9 +46,12 @@ export default function EntradasAlmacen() {
     return (c * p).toFixed(2)
   }
 
-  async function guardarEntrada(e: React.FormEvent) {
+ async function guardarEntrada(e: React.FormEvent) {
     e.preventDefault()
     
+    // Capturamos el precio para usarlo en el detalle y en la actualización del catálogo
+    const precioNumerico = parseFloat(formulario.precio_unitario) || 0
+
     if (formulario.id) {
       const { error: errMov } = await supabase.from('movimientos').update({
         guia_remision: formulario.documento, 
@@ -63,12 +66,17 @@ export default function EntradasAlmacen() {
         const { error: errDet } = await supabase.from('detalle_movimientos').update({
           material_id: formulario.material_id, 
           cantidad: parseFloat(formulario.cantidad), 
-          precio_unitario: parseFloat(formulario.precio_unitario) || 0
+          precio_unitario: precioNumerico
         }).eq('id', formulario.detalle_id)
         
         if (errDet) return alert('Error al actualizar detalle: ' + errDet.message)
       }
       
+      // NUEVO: Actualizar el último precio en el maestro de materiales
+      await supabase.from('materiales')
+        .update({ precio_unitario: precioNumerico })
+        .eq('id', formulario.material_id)
+
       alert('Entrada actualizada exitosamente.')
     } else {
       const { data: mov, error: errMov } = await supabase.from('movimientos').insert([{
@@ -88,11 +96,19 @@ export default function EntradasAlmacen() {
         movimiento_id: mov.id, 
         material_id: formulario.material_id, 
         cantidad: parseFloat(formulario.cantidad), 
-        precio_unitario: parseFloat(formulario.precio_unitario) || 0
+        precio_unitario: precioNumerico
       }])
 
-      if (errDet) return alert('Error en el detalle: ' + errDet.message)
-      else alert('Entrada registrada exitosamente.')
+      if (errDet) {
+        return alert('Error en el detalle: ' + errDet.message)
+      } else {
+        // NUEVO: Actualizar el último precio en el maestro de materiales
+        await supabase.from('materiales')
+          .update({ precio_unitario: precioNumerico })
+          .eq('id', formulario.material_id)
+
+        alert('Entrada registrada exitosamente.')
+      }
     }
 
     obtenerDatos()

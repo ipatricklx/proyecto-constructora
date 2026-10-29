@@ -16,14 +16,17 @@ export default function SalidasAlmacen() {
     observaciones: ''
   })
 
-  // Estado del detalle dinámico
-  const [detalles, setDetalles] = useState([{ material_id: '', cantidad: '', stock_actual: 0, unidad: '' }])
+  // Estado del detalle dinámico (se agrega precio_unitario)
+  const [detalles, setDetalles] = useState([{ material_id: '', cantidad: '', stock_actual: 0, unidad: '', precio_unitario: 0 }])
 
   useEffect(() => { obtenerDatos() }, [])
 
   async function obtenerDatos() {
-    // Cargar materiales con stock > 0
-    const { data: mats } = await supabase.from('materiales').select('id, nombre, codigo, stock_actual, unidad_medida').eq('estado', 'Activo')
+    // Cargar materiales con stock > 0 incluyendo precio_unitario
+    const { data: mats } = await supabase
+      .from('materiales')
+      .select('id, nombre, codigo, stock_actual, unidad_medida, precio_unitario')
+      .eq('estado', 'Activo')
     if (mats) setMateriales(mats)
       
     // Cargar proyectos
@@ -39,7 +42,7 @@ export default function SalidasAlmacen() {
   }
 
   // --- Lógica de Filas Dinámicas ---
-  const agregarFila = () => setDetalles([...detalles, { material_id: '', cantidad: '', stock_actual: 0, unidad: '' }])
+  const agregarFila = () => setDetalles([...detalles, { material_id: '', cantidad: '', stock_actual: 0, unidad: '', precio_unitario: 0 }])
   
   const eliminarFila = (index: number) => {
     if (detalles.length === 1) return; // Obligar a tener al menos una fila
@@ -56,7 +59,8 @@ export default function SalidasAlmacen() {
         ...nuevosDetalles[index], 
         material_id: valor, 
         stock_actual: mat ? mat.stock_actual : 0,
-        unidad: mat ? mat.unidad_medida : ''
+        unidad: mat ? mat.unidad_medida : '',
+        precio_unitario: mat ? (mat.precio_unitario || 0) : 0
       }
     } else {
       nuevosDetalles[index] = { ...nuevosDetalles[index], [campo]: valor }
@@ -93,11 +97,12 @@ export default function SalidasAlmacen() {
 
     if (movError) return alert('Error al crear cabecera: ' + movError.message)
 
-    // 3. Insertar Detalles
+    // 3. Insertar Detalles (incluyendo precio_unitario)
     const lineas = detallesValidos.map(d => ({ 
       movimiento_id: movData.id, 
       material_id: d.material_id, 
-      cantidad: parseFloat(d.cantidad as string) 
+      cantidad: parseFloat(d.cantidad as string),
+      precio_unitario: d.precio_unitario || 0
     }))
     
     const { error: detError } = await supabase.from('detalle_movimientos').insert(lineas)
@@ -108,7 +113,7 @@ export default function SalidasAlmacen() {
       alert('Salida registrada exitosamente.')
       // Resetear formulario
       setCabecera({ ...cabecera, proyecto_id: '', usuario: '', documento: '', observaciones: '' })
-      setDetalles([{ material_id: '', cantidad: '', stock_actual: 0, unidad: '' }])
+      setDetalles([{ material_id: '', cantidad: '', stock_actual: 0, unidad: '', precio_unitario: 0 }])
       obtenerDatos() 
     }
   }
