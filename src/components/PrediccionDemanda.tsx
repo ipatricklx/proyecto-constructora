@@ -51,8 +51,6 @@ export default function PrediccionDemanda() {
 
       if (errorSupabase) throw errorSupabase;
 
-      const API_URL = import.meta.env.VITE_API_URL;
-
       const respuesta = await fetch(`${API_URL}/api/predict/demand`); 
       if (!respuesta.ok) {
         throw new Error('No se pudo conectar con la API de Machine Learning.');
