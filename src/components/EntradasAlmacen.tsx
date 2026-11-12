@@ -1,380 +1,516 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
 
+// --- OBTENER FECHA LOCAL ---
+const getFechaLocal = () => {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// --- INTERFACES ---
+interface AtributoNombre { nombre: string }
+
+interface Material {
+  id: string
+  nombre: string
+  stock_actual: number
+  categorias?: AtributoNombre | AtributoNombre[]
+  unidades_medida?: AtributoNombre | AtributoNombre[]
+}
+
+interface DetalleMovimiento {
+  id: string
+  material_id: string
+  cantidad: number
+  precio_unitario: number
+  materiales?: Material
+}
+
+interface Movimiento {
+  id: string
+  numero_movimiento: string
+  fecha_movimiento: string
+  fecha_registro: string
+  proveedor: string
+  guia_remision: string
+  tipo_comprobante: string
+  observaciones: string
+  estado: string
+  detalle_movimientos?: DetalleMovimiento[]
+}
+
+interface FormDetalle {
+  material_id: string
+  cantidad: string
+  precio_unitario: string
+  unidad: string
+  stock_actual: number // Para mostrar el stock proyectado
+}
+
 export default function EntradasAlmacen() {
-  const [materiales, setMateriales] = useState<any[]>([])
-  const [entradas, setEntradas] = useState<any[]>([])
-  const [modalDetalle, setModalDetalle] = useState<any | null>(null)
+  const [materiales, setMateriales] = useState<Material[]>([])
+  const [entradas, setEntradas] = useState<Movimiento[]>([])
   
-  const estadoInicial = {
-    id: '', detalle_id: '',
-    fecha: new Date().toISOString().split('T')[0], proveedor: '', documento: '', tipo_comprobante: 'Factura',
-    material_id: '', categoria: '', cantidad: '', unidad: '', precio_unitario: '', total: 0, ubicacion: '', observaciones: ''
-  }
-  const [formulario, setFormulario] = useState(estadoInicial)
+  const getEstadoInicial = () => ({
+    id: '', 
+    fecha: getFechaLocal(), 
+    proveedor: '', 
+    documento: '', 
+    tipo_comprobante: 'Factura',
+    observaciones: '',
+    detalles: [{ material_id: '', cantidad: '', precio_unitario: '', unidad: '', stock_actual: 0 }] as FormDetalle[]
+  })
+
+  const [formulario, setFormulario] = useState(getEstadoInicial())
+  const [movimientoSeleccionado, setMovimientoSeleccionado] = useState<Movimiento | null>(null) // Para el Modal
+  
+  const [cargando, setCargando] = useState(true)
+  const [guardando, setGuardando] = useState(false)
+  const [busqueda, setBusqueda] = useState('')
+  const [paginaActual, setPaginaActual] = useState(1)
 
   useEffect(() => { obtenerDatos() }, [])
 
   async function obtenerDatos() {
-    // 1. Agregamos ubicaciones(nombre) a la consulta de materiales
-    const { data: mats } = await supabase.from('materiales').select('*, categorias(nombre), ubicaciones(nombre)')
-    if (mats) setMateriales(mats)
-    
-    // 2. Agregamos ubicaciones(nombre) al join de detalle_movimientos -> materiales
-    const { data: movs } = await supabase.from('movimientos')
-      .select('*, detalle_movimientos(*, materiales(*, categorias(nombre), ubicaciones(nombre)))')
-      .eq('tipo_movimiento', 'ENTRADA')
-      .order('fecha_registro', { ascending: false })
-    if (movs) setEntradas(movs)
+    setCargando(true)
+    try {
+      const [resMats, resMovs] = await Promise.all([
+        supabase.from('materiales').select('id, nombre, stock_actual, categorias(nombre), unidades_medida(nombre)'),
+        supabase.from('movimientos')
+          .select('*, detalle_movimientos(*, materiales(nombre, categorias(nombre), unidades_medida(nombre)))')
+          .eq('tipo_movimiento', 'ENTRADA')
+          .order('fecha_movimiento', { ascending: false })
+      ])
+
+      if (resMats.error) throw resMats.error
+      if (resMovs.error) throw resMovs.error
+
+      setMateriales((resMats.data as Material[]) || [])
+      setEntradas((resMovs.data as Movimiento[]) || [])
+    } catch (error: any) {
+      alert("Error al cargar datos: " + error.message)
+    } finally {
+      setCargando(false)
+    }
   }
 
-  const handleMaterialChange = (e: any) => {
-    const matId = e.target.value
-    const mat = materiales.find(m => m.id === matId)
+  const getNombreAtributo = (relacion?: AtributoNombre | AtributoNombre[]) => {
+    return Array.isArray(relacion) ? relacion[0]?.nombre : relacion?.nombre
+  }
+
+  // --- MANEJO DE MÚLTIPLES MATERIALES ---
+  const agregarFila = () => {
     setFormulario({
-      ...formulario, 
-      material_id: matId, 
-      categoria: mat?.categorias?.nombre || '', 
-      unidad: mat?.unidad_medida || '',
-      ubicacion: mat?.ubicaciones?.nombre || '' // Actualizado aquí
+      ...formulario,
+      detalles: [...formulario.detalles, { material_id: '', cantidad: '', precio_unitario: '', unidad: '', stock_actual: 0 }]
     })
   }
 
-  const calcularTotal = (cant: string | number, precio: string | number) => {
-    const c = parseFloat(cant as string) || 0
-    const p = parseFloat(precio as string) || 0
-    return (c * p).toFixed(2)
+  const removerFila = (index: number) => {
+    const nuevosDetalles = formulario.detalles.filter((_, i) => i !== index)
+    setFormulario({ ...formulario, detalles: nuevosDetalles })
   }
 
- async function guardarEntrada(e: React.FormEvent) {
-    e.preventDefault()
-    
-    // Capturamos el precio para usarlo en el detalle y en la actualización del catálogo
-    const precioNumerico = parseFloat(formulario.precio_unitario) || 0
+  const handleDetalleChange = (index: number, campo: keyof FormDetalle, valor: string) => {
+    const nuevosDetalles = [...formulario.detalles]
+    nuevosDetalles[index] = { ...nuevosDetalles[index], [campo]: valor }
 
-    if (formulario.id) {
-      const { error: errMov } = await supabase.from('movimientos').update({
-        guia_remision: formulario.documento, 
-        proveedor: formulario.proveedor,
-        tipo_comprobante: formulario.tipo_comprobante, 
-        observaciones: formulario.observaciones
-      }).eq('id', formulario.id)
-
-      if (errMov) return alert('Error al actualizar cabecera: ' + errMov.message)
-
-      if (formulario.detalle_id) {
-        const { error: errDet } = await supabase.from('detalle_movimientos').update({
-          material_id: formulario.material_id, 
-          cantidad: parseFloat(formulario.cantidad), 
-          precio_unitario: precioNumerico
-        }).eq('id', formulario.detalle_id)
-        
-        if (errDet) return alert('Error al actualizar detalle: ' + errDet.message)
-      }
-      
-      // NUEVO: Actualizar el último precio en el maestro de materiales
-      await supabase.from('materiales')
-        .update({ precio_unitario: precioNumerico })
-        .eq('id', formulario.material_id)
-
-      alert('Entrada actualizada exitosamente.')
-    } else {
-      const { data: mov, error: errMov } = await supabase.from('movimientos').insert([{
-        tipo_movimiento: 'ENTRADA', 
-        guia_remision: formulario.documento, 
-        proveedor: formulario.proveedor,
-        tipo_comprobante: formulario.tipo_comprobante, 
-        observaciones: formulario.observaciones, 
-        estado: 'Completada',
-        usuario_responsable: 'Patrick Abanto',
-        numero_entrada: `ENT-${Math.floor(1000 + Math.random() * 9000)}` 
-      }]).select().single()
-
-      if (errMov) return alert('Error al crear cabecera: ' + errMov.message)
-
-      const { error: errDet } = await supabase.from('detalle_movimientos').insert([{
-        movimiento_id: mov.id, 
-        material_id: formulario.material_id, 
-        cantidad: parseFloat(formulario.cantidad), 
-        precio_unitario: precioNumerico
-      }])
-
-      if (errDet) {
-        return alert('Error en el detalle: ' + errDet.message)
-      } else {
-        // NUEVO: Actualizar el último precio en el maestro de materiales
-        await supabase.from('materiales')
-          .update({ precio_unitario: precioNumerico })
-          .eq('id', formulario.material_id)
-
-        alert('Entrada registrada exitosamente.')
-      }
+    // Autocompletar unidad y obtener stock actual al seleccionar material
+    if (campo === 'material_id') {
+      const mat = materiales.find(m => m.id === valor)
+      nuevosDetalles[index].unidad = getNombreAtributo(mat?.unidades_medida) || ''
+      nuevosDetalles[index].stock_actual = mat?.stock_actual || 0
     }
 
-    obtenerDatos()
-    setFormulario(estadoInicial)
+    setFormulario({ ...formulario, detalles: nuevosDetalles })
   }
 
-  const editarEntrada = (mov: any) => {
-    const detalle = mov.detalle_movimientos && mov.detalle_movimientos[0]
-    const material = detalle?.materiales
+  // --- GUARDAR, EDITAR Y ANULAR ---
+  async function guardarEntrada(e: React.FormEvent) {
+    e.preventDefault()
+    
+    // 1. Validaciones Robustas
+    const materialIds = formulario.detalles.map(d => d.material_id)
+    
+    if (materialIds.some(id => !id)) {
+      return alert("Todos los detalles deben tener un material seleccionado.")
+    }
+    
+    if (new Set(materialIds).size !== materialIds.length) {
+      return alert("No puedes agregar el mismo material más de una vez. Suma las cantidades en una sola fila.")
+    }
 
+    if (formulario.detalles.some(d => {
+      const qty = parseFloat(d.cantidad)
+      return isNaN(qty) || qty <= 0
+    })) {
+      return alert("Todas las cantidades deben ser números mayores a 0.")
+    }
+
+    setGuardando(true)
+    
+    try {
+      const usuarioTemporal = '239de726-7bfe-4b39-99d7-309c771d66ae' // Cambiar cuando tengas Auth
+      
+      const payload = {
+        p_movimiento_id: formulario.id || null,
+        p_fecha_movimiento: formulario.fecha,
+        p_proveedor: formulario.proveedor,
+        p_guia_remision: formulario.documento,
+        p_tipo_comprobante: formulario.tipo_comprobante,
+        p_observaciones: formulario.observaciones,
+        p_detalles: formulario.detalles.map(d => ({
+          material_id: d.material_id,
+          cantidad: parseFloat(d.cantidad),
+          precio_unitario: parseFloat(d.precio_unitario) || 0
+        })),
+        p_usuario_responsable: usuarioTemporal
+      }
+
+      const { error } = await supabase.rpc('gestionar_entrada', payload)
+      if (error) throw error
+
+      // 4. Esperar a que los datos se actualicen antes de limpiar
+      await obtenerDatos()
+      setFormulario(getEstadoInicial())
+      alert(formulario.id ? "Entrada actualizada correctamente." : "Entrada registrada con éxito.")
+    } catch (error: any) {
+      alert('Error al guardar: ' + error.message)
+    } finally {
+      setGuardando(false)
+    }
+  }
+
+  const editarEntrada = (mov: Movimiento) => {
     setFormulario({
       id: mov.id,
-      detalle_id: detalle?.id || '',
-      fecha: mov.fecha_registro ? mov.fecha_registro.split('T')[0] : '',
+      fecha: mov.fecha_movimiento || mov.fecha_registro.split('T')[0],
       proveedor: mov.proveedor || '',
       documento: mov.guia_remision || '',
       tipo_comprobante: mov.tipo_comprobante || 'Factura',
-      material_id: detalle?.material_id || '',
-      categoria: material?.categorias?.nombre || '',
-      cantidad: detalle?.cantidad || '',
-      unidad: material?.unidad_medida || '',
-      precio_unitario: detalle?.precio_unitario || '',
-      total: parseFloat(calcularTotal(detalle?.cantidad, detalle?.precio_unitario)),
-      ubicacion: material?.ubicaciones?.nombre || '', // Actualizado aquí
-      observaciones: mov.observaciones || ''
+      observaciones: mov.observaciones || '',
+      detalles: (mov.detalle_movimientos || []).map(d => ({
+        material_id: d.material_id,
+        cantidad: d.cantidad.toString(),
+        precio_unitario: d.precio_unitario.toString(),
+        unidad: getNombreAtributo(d.materiales?.unidades_medida) || '',
+        stock_actual: d.materiales?.stock_actual || 0
+      }))
     })
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
-  const eliminarEntrada = async (id: string) => {
-    if (window.confirm('¿Estás seguro de que deseas eliminar este registro de entrada?')) {
-      const { error } = await supabase.from('movimientos').delete().eq('id', id)
-      if (error) alert('Error al eliminar: ' + error.message)
-      else obtenerDatos()
+  const anularEntrada = async (mov: Movimiento) => {
+    if (mov.estado === 'Anulada') return alert('Esta entrada ya está anulada.')
+    if (!window.confirm('¿Estás seguro de anular esta entrada? El stock se revertirá.')) return
+
+    try {
+      const { error } = await supabase.rpc('anular_movimiento', { p_movimiento_id: mov.id })
+      if (error) throw error
+      await obtenerDatos()
+      alert('Entrada anulada y stock revertido correctamente.')
+    } catch (error: any) {
+      alert('Error al anular: ' + error.message)
     }
   }
 
-  const formatearFecha = (fechaString: string) => {
-    if (!fechaString) return '-'
-    const fecha = new Date(fechaString)
-    return fecha.toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit', year: 'numeric' })
+  // --- CÁLCULOS Y KPIs (Corregidos con extracción segura) ---
+  const d = new Date()
+  const mesActualStr = String(d.getMonth() + 1).padStart(2, '0')
+  const añoActualStr = String(d.getFullYear())
+
+  const entradasValidas = entradas.filter(e => e.estado !== 'Anulada')
+  
+  const entradasDelMes = entradasValidas.filter(e => {
+    const fechaString = e.fecha_movimiento || e.fecha_registro.split('T')[0]
+    const [year, month] = fechaString.split('-')
+    return year === añoActualStr && month === mesActualStr
+  })
+
+  const totalMovimientosMes = entradasDelMes.length
+  const totalItemsMes = entradasDelMes.reduce((acc, mov) => acc + (mov.detalle_movimientos?.length || 0), 0)
+  const valorTotalMes = entradasDelMes.reduce((acc, mov) => {
+    const totalMov = (mov.detalle_movimientos || []).reduce((sum, det) => sum + (det.cantidad * det.precio_unitario), 0)
+    return acc + totalMov
+  }, 0)
+
+  // --- FILTROS Y PAGINACIÓN ---
+  const term = busqueda.toLowerCase()
+  const entradasFiltradas = entradas.filter(m => 
+    (m.proveedor?.toLowerCase() || '').includes(term) ||
+    (m.guia_remision?.toLowerCase() || '').includes(term) ||
+    (m.numero_movimiento?.toLowerCase() || '').includes(term)
+  )
+
+  const itemsPorPagina = 10
+  const totalPaginas = Math.ceil(entradasFiltradas.length / itemsPorPagina) || 1
+  const entradasPaginadas = entradasFiltradas.slice((paginaActual - 1) * itemsPorPagina, paginaActual * itemsPorPagina)
+
+  const formatearFechaLocal = (fechaISO: string) => {
+    if (!fechaISO) return '-'
+    const [year, month, day] = fechaISO.split('T')[0].split('-')
+    return `${day}/${month}/${year}`
   }
 
   return (
     <div className="space-y-6 relative">
       
-      {/* Modal de Detalle */}
-      {modalDetalle && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-bold text-gray-800">Detalle de Entrada {modalDetalle.numero_entrada}</h3>
-              <button onClick={() => setModalDetalle(null)} className="text-gray-400 hover:text-gray-600">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-              </button>
-            </div>
-            <div className="space-y-3 text-sm">
-              <p><span className="font-semibold text-gray-600">Proveedor:</span> {modalDetalle.proveedor}</p>
-              <p><span className="font-semibold text-gray-600">Documento:</span> {modalDetalle.guia_remision} ({modalDetalle.tipo_comprobante})</p>
-              <p><span className="font-semibold text-gray-600">Material:</span> {modalDetalle.detalle_movimientos?.[0]?.materiales?.nombre}</p>
-              <p><span className="font-semibold text-gray-600">Cantidad:</span> {modalDetalle.detalle_movimientos?.[0]?.cantidad} {modalDetalle.detalle_movimientos?.[0]?.materiales?.unidad_medida}</p>
-              <p><span className="font-semibold text-gray-600">Observaciones:</span> {modalDetalle.observaciones || 'Ninguna'}</p>
-              <p><span className="font-semibold text-gray-600">Registrado por:</span> {modalDetalle.usuario_responsable}</p>
-            </div>
-            <button onClick={() => setModalDetalle(null)} className="mt-6 w-full bg-gray-100 hover:bg-gray-200 text-gray-800 font-medium py-2 rounded-md transition-colors">
-              Cerrar
-            </button>
-          </div>
+      {/* 1. TARJETAS DE RESUMEN (KPIs) */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex flex-col justify-center">
+          <span className="text-sm font-medium text-gray-500">Total Histórico</span>
+          <span className="text-2xl font-bold text-gray-800">{entradasValidas.length}</span>
         </div>
-      )}
-
-      {/* Cabecera Principal */}
-      <div className="flex justify-between items-center">
-        <div className="flex items-center gap-4">
-          <div className="p-2.5 bg-blue-50 text-blue-600 rounded-lg shadow-sm border border-blue-100">
-            <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 14.15v4.25c0 1.094-.787 2.036-1.872 2.118v0H5.622c-1.085-.082-1.872-1.024-1.872-2.118v-4.25m16.5 0a2.18 2.18 0 0 0 .75-1.661V8.706c0-1.081-.768-2.015-1.837-2.175a48.114 48.114 0 0 0-3.413-.387m4.5 8.006c-.194.165-.42.295-.673.38A23.978 23.978 0 0 1 12 15.75c-2.648 0-5.195-.429-7.577-1.22a2.016 2.016 0 0 1-.673-.38m0 0A2.18 2.18 0 0 1 3 12.489V8.706c0-1.081.768-2.015 1.837-2.175a48.111 48.111 0 0 1 3.413-.387m7.5 0V5.25A2.25 2.25 0 0 0 13.5 3h-3a2.25 2.25 0 0 0-2.25 2.25v.894m7.5 0a48.667 48.667 0 0 0-7.5 0M12 12.75h.008v.008H12v-.008Z" /></svg>
-          </div>
-          <div>
-            <h2 className="text-2xl font-bold text-gray-800">Registro de Entradas</h2>
-            <p className="text-gray-500 text-sm">Registra los ingresos de materiales al almacén. Asegúrate de completar todos los campos.</p>
-          </div>
+        <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex flex-col justify-center">
+          <span className="text-sm font-medium text-gray-500">Entradas (Este Mes)</span>
+          <span className="text-2xl font-bold text-blue-600">{totalMovimientosMes}</span>
         </div>
-        <button onClick={() => setFormulario(estadoInicial)} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-md font-medium text-sm flex items-center gap-2 shadow-sm transition-colors">
-          <svg fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
-          Nueva Entrada
-        </button>
+        <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex flex-col justify-center">
+          <span className="text-sm font-medium text-gray-500">Ítems Registrados (Mes)</span>
+          <span className="text-2xl font-bold text-green-600">{totalItemsMes}</span>
+        </div>
+        <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex flex-col justify-center">
+          <span className="text-sm font-medium text-gray-500">Inversión (Mes)</span>
+          <span className="text-2xl font-bold text-indigo-600">S/ {valorTotalMes.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</span>
+        </div>
       </div>
 
-      {/* Tarjeta de Formulario */}
+      {/* 2. FORMULARIO REDISEÑADO */}
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
-        <div className="px-5 py-4 border-b border-gray-100 font-semibold text-gray-700 flex items-center gap-2 bg-gray-50/50">
-          <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m3.75 9v6m3-3H9m1.5-12H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
-          {formulario.id ? 'Editar Entrada' : 'Información de la Entrada'}
+        <div className="px-5 py-4 border-b border-gray-100 font-semibold text-gray-800 bg-gray-50/50 flex justify-between items-center">
+          <span>{formulario.id ? `Editando: ${entradas.find(e=>e.id === formulario.id)?.numero_movimiento}` : 'Registrar Nueva Entrada'}</span>
+          <button type="button" onClick={() => setFormulario(getEstadoInicial())} className="text-sm text-blue-600 hover:underline font-medium">Limpiar Formulario</button>
         </div>
-        <form onSubmit={guardarEntrada} className="p-6 grid grid-cols-1 md:grid-cols-4 gap-x-6 gap-y-5">
-          {/* Fila 1 */}
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1.5">Fecha de ingreso <span className="text-red-500">*</span></label>
-            <input type="date" required disabled={!!formulario.id} className="w-full border border-gray-300 rounded-md p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500 transition-shadow disabled:bg-gray-50 disabled:text-gray-500" value={formulario.fecha} onChange={e => setFormulario({...formulario, fecha: e.target.value})} />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1.5">Proveedor <span className="text-red-500">*</span></label>
-            <input required placeholder="Ej. Cemento Andino S.A." className="w-full border border-gray-300 rounded-md p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500 transition-shadow" value={formulario.proveedor} onChange={e => setFormulario({...formulario, proveedor: e.target.value})} />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1.5">Documento de ingreso <span className="text-red-500">*</span></label>
-            <input required placeholder="FACT-001245" className="w-full border border-gray-300 rounded-md p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500 transition-shadow" value={formulario.documento} onChange={e => setFormulario({...formulario, documento: e.target.value})} />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1.5">Tipo de comprobante <span className="text-red-500">*</span></label>
-            <select className="w-full border border-gray-300 rounded-md p-2.5 text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500 transition-shadow" value={formulario.tipo_comprobante} onChange={e => setFormulario({...formulario, tipo_comprobante: e.target.value})}>
-              <option value="Factura">Factura</option>
-              <option value="Boleta">Boleta</option>
-              <option value="Guía de Remisión">Guía de Remisión</option>
-            </select>
-          </div>
-
-          {/* Fila 2 */}
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1.5">Material <span className="text-red-500">*</span></label>
-            <select required className="w-full border border-gray-300 rounded-md p-2.5 text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500 transition-shadow" value={formulario.material_id} onChange={handleMaterialChange}>
-              <option value="">Seleccionar material</option>
-              {materiales.map(m => <option key={m.id} value={m.id}>{m.nombre}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1.5">Categoría</label>
-            <input disabled className="w-full border border-gray-200 bg-gray-50 rounded-md p-2.5 text-sm text-gray-500 cursor-not-allowed" value={formulario.categoria} />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1.5">Cantidad ingresada <span className="text-red-500">*</span></label>
-            <input type="number" step="0.1" required className="w-full border border-gray-300 rounded-md p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500 transition-shadow" value={formulario.cantidad} onChange={e => setFormulario({...formulario, cantidad: e.target.value, total: parseFloat(calcularTotal(e.target.value, formulario.precio_unitario))})} />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1.5">Unidad de medida <span className="text-red-500">*</span></label>
-            <input disabled className="w-full border border-gray-200 bg-gray-50 rounded-md p-2.5 text-sm text-gray-500 cursor-not-allowed" value={formulario.unidad} />
+        
+        <form onSubmit={guardarEntrada} className="p-6">
+          <h3 className="text-sm font-bold text-gray-500 uppercase mb-4 tracking-wider">1. Datos del Documento</h3>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            <div>
+              <label className="block text-xs font-semibold text-gray-700 mb-1.5">Fecha de ingreso *</label>
+              <input type="date" required className="w-full border border-gray-300 rounded-md p-2 text-sm" value={formulario.fecha} onChange={e => setFormulario({...formulario, fecha: e.target.value})} />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-gray-700 mb-1.5">Proveedor *</label>
+              <input required placeholder="Ej. Cemento Andino" className="w-full border border-gray-300 rounded-md p-2 text-sm" value={formulario.proveedor} onChange={e => setFormulario({...formulario, proveedor: e.target.value})} />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-gray-700 mb-1.5">Documento *</label>
+              <input required placeholder="FACT-001" className="w-full border border-gray-300 rounded-md p-2 text-sm" value={formulario.documento} onChange={e => setFormulario({...formulario, documento: e.target.value})} />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-gray-700 mb-1.5">Comprobante *</label>
+              <select className="w-full border border-gray-300 rounded-md p-2 text-sm bg-white" value={formulario.tipo_comprobante} onChange={e => setFormulario({...formulario, tipo_comprobante: e.target.value})}>
+                <option value="Factura">Factura</option>
+                <option value="Boleta">Boleta</option>
+                <option value="Guía de Remisión">Guía de Remisión</option>
+              </select>
+            </div>
           </div>
 
-          {/* Fila 3 */}
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1.5">Precio unitario (S/.)</label>
-            <input type="number" step="0.01" className="w-full border border-gray-300 rounded-md p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500 transition-shadow" value={formulario.precio_unitario} onChange={e => setFormulario({...formulario, precio_unitario: e.target.value, total: parseFloat(calcularTotal(formulario.cantidad, e.target.value))})} />
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider">2. Materiales Recibidos</h3>
+            <button type="button" onClick={agregarFila} className="text-sm bg-blue-50 text-blue-700 px-3 py-1.5 rounded-md font-medium hover:bg-blue-100 transition-colors">+ Agregar Material</button>
           </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1.5">Total (S/.)</label>
-            <input disabled className="w-full border border-gray-200 bg-gray-50 rounded-md p-2.5 text-sm font-semibold text-gray-700 cursor-not-allowed" value={Number(formulario.total).toFixed(2)} />
-          </div>
-          <div>
-  <label className="block text-xs font-semibold text-gray-700 mb-1.5">Ubicación en almacén</label>
-  <input 
-    disabled 
-    className="w-full border border-gray-200 bg-gray-50 rounded-md p-2.5 text-sm text-gray-500 cursor-not-allowed" 
-    value={formulario.ubicacion || 'Se asigna según el material'} 
-  />
-</div>
-          <div className="row-span-2">
-            <label className="block text-xs font-semibold text-gray-700 mb-1.5">Observaciones</label>
-            <textarea className="w-full border border-gray-300 rounded-md p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500 h-[108px] transition-shadow resize-none" placeholder="Material entregado según orden..." value={formulario.observaciones} onChange={e => setFormulario({...formulario, observaciones: e.target.value})} />
+          
+          <div className="space-y-4 mb-6">
+            {formulario.detalles.map((det, index) => {
+              const cantidadIngresada = parseFloat(det.cantidad) || 0
+              const precioUnitario = parseFloat(det.precio_unitario) || 0
+              
+              return (
+                <div key={index} className="flex flex-col md:flex-row gap-3 items-start p-4 border border-gray-100 bg-gray-50/30 rounded-lg relative group">
+                  <div className="flex-1 w-full">
+                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Material *</label>
+                    <select required className="w-full border border-gray-300 rounded-md p-2 text-sm bg-white" value={det.material_id} onChange={(e) => handleDetalleChange(index, 'material_id', e.target.value)}>
+                      <option value="">Seleccionar...</option>
+                      {materiales.map(m => <option key={m.id} value={m.id}>{m.nombre}</option>)}
+                    </select>
+                    {/* Visualización de Stock Proyectado */}
+                    {det.material_id && (
+                      <div className="mt-1.5 text-[11px] font-medium">
+                        <span className="text-gray-500">Stock actual: {det.stock_actual} {det.unidad}</span>
+                        <span className="mx-2 text-gray-300">|</span>
+                        <span className="text-blue-600">Proyectado: {det.stock_actual + cantidadIngresada} {det.unidad}</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="w-full md:w-28">
+                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Cantidad *</label>
+                    <input type="number" step="0.01" min="0.01" required className="w-full border border-gray-300 rounded-md p-2 text-sm" value={det.cantidad} onChange={(e) => handleDetalleChange(index, 'cantidad', e.target.value)} />
+                  </div>
+                  <div className="w-full md:w-24">
+                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Unidad</label>
+                    <input disabled className="w-full border border-gray-200 bg-gray-100 rounded-md p-2 text-sm text-gray-500" value={det.unidad || '-'} />
+                  </div>
+                  <div className="w-full md:w-28">
+                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Precio Unit. (S/)</label>
+                    <input type="number" step="0.01" min="0" className="w-full border border-gray-300 rounded-md p-2 text-sm" value={det.precio_unitario} onChange={(e) => handleDetalleChange(index, 'precio_unitario', e.target.value)} />
+                  </div>
+                  <div className="w-full md:w-28">
+                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Total (S/)</label>
+                    <input disabled className="w-full border border-gray-200 bg-gray-100 rounded-md p-2 text-sm text-gray-500 font-semibold" value={(cantidadIngresada * precioUnitario).toFixed(2)} />
+                  </div>
+                  {formulario.detalles.length > 1 && (
+                    <button type="button" onClick={() => removerFila(index)} className="mt-6 p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors" title="Eliminar fila">
+                      <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
+                    </button>
+                  )}
+                </div>
+              )
+            })}
           </div>
 
-          <div className="md:col-span-3 flex justify-end items-end gap-3 pt-2">
-            <button type="button" onClick={() => setFormulario(estadoInicial)} className="px-5 py-2.5 border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 flex items-center gap-2 transition-colors">
-              <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
-              Limpiar
-            </button>
-            <button type="submit" className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-medium flex items-center gap-2 transition-colors shadow-sm">
-              <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M10.125 2.25h-4.5c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125v-9M10.125 2.25h.375a9 9 0 019 9v.375M10.125 2.25A3.375 3.375 0 0113.5 5.625v1.875a3.375 3.375 0 003.375 3.375h1.875M16.5 7.5h3" /></svg>
-              {formulario.id ? 'Actualizar' : 'Guardar'}
-            </button>
+          <div className="grid md:grid-cols-2 gap-6 items-end">
+            <div>
+              <label className="block text-xs font-semibold text-gray-700 mb-1.5">Observaciones Generales</label>
+              <input className="w-full border border-gray-300 rounded-md p-2 text-sm" value={formulario.observaciones} onChange={e => setFormulario({...formulario, observaciones: e.target.value})} placeholder="Notas sobre la entrega..." />
+            </div>
+            <div className="flex justify-end gap-3">
+              <button type="submit" disabled={guardando} className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-medium disabled:opacity-70 flex items-center gap-2">
+                {guardando ? 'Guardando...' : (formulario.id ? 'Actualizar Entrada' : 'Confirmar y Guardar')}
+              </button>
+            </div>
           </div>
         </form>
       </div>
 
-      {/* Tabla de Entradas Registradas */}
+      {/* 3. HISTORIAL */}
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
-        <div className="p-5 border-b border-gray-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white">
-          <div className="font-semibold text-gray-800 flex items-center gap-2">
-            <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 text-gray-400">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0Z" />
-            </svg>
-            Entradas Registradas
-          </div>
-          <div className="flex gap-3 w-full sm:w-auto">
-            <div className="relative flex-1 sm:w-80">
-              <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4 absolute left-3 top-2.5 text-gray-400">
-                <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607Z" />
-              </svg>
-              <input type="text" placeholder="Buscar por proveedor, material, documento..." className="pl-9 w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-shadow" />
-            </div>
-            <button className="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors font-medium shadow-sm">
-              <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75" />
-              </svg>
-              Filtros
-            </button>
-          </div>
+        <div className="p-5 border-b flex justify-between items-center bg-gray-50/50">
+          <div className="font-semibold text-gray-800">Historial de Entradas</div>
+          <input type="text" placeholder="Buscar documento o proveedor..." className="border border-gray-300 rounded-md p-2 text-sm w-full sm:w-72" value={busqueda} onChange={e => { setBusqueda(e.target.value); setPaginaActual(1); }} />
         </div>
         
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50/80">
-              <tr>
-                {['Nº Entrada', 'Fecha', 'Proveedor', 'Documento', 'Material', 'Categoría', 'Cantidad', 'Unidad', 'Total (S/.)', 'Ubicación', 'Estado', 'Acciones'].map(h => (
-                  <th key={h} className="px-4 py-3.5 text-left text-xs font-bold text-gray-600 uppercase tracking-wider whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="bg-white divide-y divide-gray-100">
-              {entradas.map((mov) => {
-                const detalle = mov.detalle_movimientos && mov.detalle_movimientos[0];
-                const material = detalle?.materiales;
-                const categoria = material?.categorias;
-                const total = detalle ? (parseFloat(detalle.cantidad) * parseFloat(detalle.precio_unitario)).toFixed(2) : '0.00';
-
-                return (
-                  <tr key={mov.id} className="hover:bg-blue-50/50 transition-colors">
-                    <td className="px-4 py-3.5 text-sm font-semibold text-blue-600 whitespace-nowrap">{mov.numero_entrada || 'ENT-0000'}</td>
-                    <td className="px-4 py-3.5 text-sm text-gray-600 whitespace-nowrap">{formatearFecha(mov.fecha_registro)}</td>
-                    <td className="px-4 py-3.5 text-sm text-gray-700 font-medium whitespace-nowrap">{mov.proveedor || '-'}</td>
-                    <td className="px-4 py-3.5 text-sm text-gray-600 whitespace-nowrap">{mov.guia_remision || '-'}</td>
-                    <td className="px-4 py-3.5 text-sm text-blue-700 font-medium whitespace-nowrap">{material?.nombre || '-'}</td>
-                    <td className="px-4 py-3.5 text-sm text-gray-500 whitespace-nowrap">{categoria?.nombre || '-'}</td>
-                    <td className="px-4 py-3.5 text-sm font-semibold text-gray-800 whitespace-nowrap">{detalle?.cantidad || '0'}</td>
-                    <td className="px-4 py-3.5 text-sm text-gray-500 whitespace-nowrap">{material?.unidad_medida || '-'}</td>
-                    <td className="px-4 py-3.5 text-sm text-gray-600 whitespace-nowrap">{total}</td>
-                    {/* Actualizado para mostrar ubicaciones.nombre */}
-                    <td className="px-4 py-3.5 text-sm text-gray-500 whitespace-nowrap">{material?.ubicaciones?.nombre || '-'}</td>
-                    <td className="px-4 py-3.5 text-sm whitespace-nowrap">
-                      <span className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${mov.estado === 'Completada' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-yellow-50 text-yellow-700 border-yellow-200'}`}>
-                        {mov.estado || 'Completada'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3.5 text-sm flex gap-1 items-center whitespace-nowrap">
-                      <button onClick={() => setModalDetalle(mov)} className="text-blue-500 hover:text-blue-700 hover:bg-blue-50 p-1.5 rounded-md transition-colors" title="Ver detalle">
-                        <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                      </button>
-                      <button onClick={() => editarEntrada(mov)} className="text-gray-500 hover:text-gray-700 hover:bg-gray-100 p-1.5 rounded-md transition-colors" title="Editar">
-                        <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" /></svg>
-                      </button>
-                      <button onClick={() => eliminarEntrada(mov.id)} className="text-red-400 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-md transition-colors" title="Eliminar">
-                        <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
-                      </button>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+        {cargando ? (
+          <div className="p-10 text-center text-gray-500">Cargando movimientos...</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-white">
+                <tr>
+                  {['Código', 'Fecha', 'Proveedor', 'Documento', 'Materiales', 'Valor Total', 'Estado', 'Acciones'].map(h => (
+                    <th key={h} className="px-5 py-3.5 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 bg-white">
+                {entradasPaginadas.map((mov) => {
+                  const anulada = mov.estado === 'Anulada'
+                  const numMateriales = mov.detalle_movimientos?.length || 0
+                  const valorTotal = (mov.detalle_movimientos || []).reduce((sum, d) => sum + (d.cantidad * d.precio_unitario), 0)
+                  
+                  return (
+                    <tr key={mov.id} className={`hover:bg-blue-50/30 transition-colors ${anulada ? 'opacity-50 bg-gray-50' : ''}`}>
+                      <td className="px-5 py-4 text-sm font-bold text-blue-600">{mov.numero_movimiento}</td>
+                      <td className="px-5 py-4 text-sm text-gray-600">{formatearFechaLocal(mov.fecha_movimiento || mov.fecha_registro)}</td>
+                      <td className="px-5 py-4 text-sm font-medium text-gray-800">{mov.proveedor}</td>
+                      <td className="px-5 py-4 text-sm text-gray-500">{mov.tipo_comprobante} {mov.guia_remision}</td>
+                      <td className="px-5 py-4 text-sm text-gray-600">
+                        {numMateriales === 1 ? mov.detalle_movimientos?.[0]?.materiales?.nombre : `${numMateriales} ítems distintos`}
+                      </td>
+                      <td className="px-5 py-4 text-sm font-medium text-gray-700">S/ {valorTotal.toFixed(2)}</td>
+                      <td className="px-5 py-4 text-sm">
+                        <span className={`px-2.5 py-1 rounded-md text-xs font-semibold ${anulada ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                          {mov.estado}
+                        </span>
+                      </td>
+                      <td className="px-5 py-4 text-sm flex gap-1 items-center">
+                        {/* Botón Ver Detalles */}
+                        <button onClick={() => setMovimientoSeleccionado(mov)} className="text-gray-400 hover:text-gray-700 hover:bg-gray-100 p-1.5 rounded-md transition-colors" title="Ver Detalles">
+                          <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>
+                        </button>
+                        <button disabled={anulada} onClick={() => editarEntrada(mov)} className="text-gray-400 hover:text-blue-600 hover:bg-blue-50 p-1.5 rounded-md transition-colors disabled:opacity-0" title="Editar">
+                          <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" /></svg>
+                        </button>
+                        <button disabled={anulada} onClick={() => anularEntrada(mov)} className="text-gray-400 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-md transition-colors disabled:opacity-0" title="Anular">
+                          <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M18.364 18.364A9 9 0 0 0 5.636 5.636m12.728 12.728A9 9 0 0 1 5.636 5.636m12.728 12.728L5.636 5.636" /></svg>
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
         
-        {/* Paginación */}
-        <div className="p-4 border-t border-gray-200 flex items-center justify-between bg-gray-50/50">
-          <span className="text-sm text-gray-500 font-medium">
-            Mostrando 1 - {entradas.length} de {entradas.length} entradas
-          </span>
+        <div className="p-4 border-t border-gray-100 flex justify-between items-center bg-gray-50/50">
+          <span className="text-sm text-gray-500 font-medium">Mostrando pág {paginaActual} de {totalPaginas}</span>
           <div className="flex gap-2">
-            <button disabled className="px-3.5 py-1.5 border border-gray-300 rounded-md bg-white text-sm font-medium text-gray-400 opacity-50 cursor-not-allowed shadow-sm">
-              <svg fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" /></svg>
-            </button>
-            <span className="px-4 py-1.5 border border-blue-600 rounded-md bg-blue-600 text-white text-sm font-bold shadow-sm">1</span>
-            <button disabled className="px-3.5 py-1.5 border border-gray-300 rounded-md bg-white text-sm font-medium text-gray-400 opacity-50 cursor-not-allowed shadow-sm">
-              <svg fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
-            </button>
+            <button onClick={() => setPaginaActual(p => Math.max(1, p - 1))} disabled={paginaActual === 1} className="px-3 py-1.5 bg-white border border-gray-300 rounded-md text-sm font-medium disabled:opacity-50">Anterior</button>
+            <button onClick={() => setPaginaActual(p => Math.min(totalPaginas, p + 1))} disabled={paginaActual === totalPaginas} className="px-3 py-1.5 bg-white border border-gray-300 rounded-md text-sm font-medium disabled:opacity-50">Siguiente</button>
           </div>
         </div>
       </div>
+
+      {/* 4. MODAL DE DETALLES */}
+      {movimientoSeleccionado && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+              <h3 className="font-bold text-gray-800">Detalle de Entrada: {movimientoSeleccionado.numero_movimiento}</h3>
+              <button onClick={() => setMovimientoSeleccionado(null)} className="text-gray-400 hover:text-gray-700">
+                <svg fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+            
+            <div className="p-6">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div><span className="block text-xs font-semibold text-gray-500">Fecha</span><span className="text-sm">{formatearFechaLocal(movimientoSeleccionado.fecha_movimiento || movimientoSeleccionado.fecha_registro)}</span></div>
+                <div><span className="block text-xs font-semibold text-gray-500">Proveedor</span><span className="text-sm font-medium">{movimientoSeleccionado.proveedor}</span></div>
+                <div><span className="block text-xs font-semibold text-gray-500">Documento</span><span className="text-sm">{movimientoSeleccionado.tipo_comprobante} {movimientoSeleccionado.guia_remision}</span></div>
+                <div><span className="block text-xs font-semibold text-gray-500">Estado</span>
+                  <span className={`text-sm font-semibold ${movimientoSeleccionado.estado === 'Anulada' ? 'text-red-600' : 'text-emerald-600'}`}>{movimientoSeleccionado.estado}</span>
+                </div>
+              </div>
+              
+              <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Ítems Recibidos</h4>
+              <div className="border border-gray-200 rounded-lg overflow-hidden">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-2 text-left text-xs font-bold text-gray-500">Material</th>
+                      <th className="px-4 py-2 text-right text-xs font-bold text-gray-500">Cantidad</th>
+                      <th className="px-4 py-2 text-right text-xs font-bold text-gray-500">P. Unitario</th>
+                      <th className="px-4 py-2 text-right text-xs font-bold text-gray-500">Subtotal</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 bg-white">
+                    {(movimientoSeleccionado.detalle_movimientos || []).map(det => (
+                      <tr key={det.id}>
+                        <td className="px-4 py-2 text-sm text-gray-800">{det.materiales?.nombre}</td>
+                        <td className="px-4 py-2 text-sm text-gray-600 text-right">{det.cantidad} {getNombreAtributo(det.materiales?.unidades_medida)}</td>
+                        <td className="px-4 py-2 text-sm text-gray-600 text-right">S/ {det.precio_unitario.toFixed(2)}</td>
+                        <td className="px-4 py-2 text-sm font-medium text-gray-700 text-right">S/ {(det.cantidad * det.precio_unitario).toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="bg-gray-50">
+                    <tr>
+                      <td colSpan={3} className="px-4 py-2 text-right text-xs font-bold text-gray-500 uppercase">Total</td>
+                      <td className="px-4 py-2 text-right text-sm font-bold text-indigo-600">
+                        S/ {(movimientoSeleccionado.detalle_movimientos || []).reduce((sum, d) => sum + (d.cantidad * d.precio_unitario), 0).toFixed(2)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+              
+              {movimientoSeleccionado.observaciones && (
+                <div className="mt-4">
+                  <span className="block text-xs font-semibold text-gray-500 mb-1">Observaciones</span>
+                  <p className="text-sm text-gray-700 bg-gray-50 p-3 rounded-md border border-gray-100">{movimientoSeleccionado.observaciones}</p>
+                </div>
+              )}
+            </div>
+            
+            <div className="px-6 py-4 border-t border-gray-100 bg-gray-50 flex justify-end">
+              <button onClick={() => setMovimientoSeleccionado(null)} className="px-4 py-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50">Cerrar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   )
 }
