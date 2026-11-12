@@ -15,13 +15,18 @@ supabase: Client = create_client(url, key)
 
 app = FastAPI(title="ML Almacén API - HAKU")
 
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "https://proyecto-constructora-sable.vercel.app"
+    ],
+    allow_credentials=False,
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
+
 
 @app.get("/")
 def health_check():

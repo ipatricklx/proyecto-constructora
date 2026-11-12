@@ -29,6 +29,9 @@ interface PrediccionCompleta extends PrediccionAPI {
   cobertura_pct: number;
 }
 
+
+const API_URL = import.meta.env.VITE_API_URL;
+
 export default function PrediccionDemanda() {
   const [predicciones, setPredicciones] = useState<PrediccionCompleta[]>([]);
   const [metricasModelo, setMetricasModelo] = useState<MetricasModelo | null>(null);
@@ -48,7 +51,9 @@ export default function PrediccionDemanda() {
 
       if (errorSupabase) throw errorSupabase;
 
-      const respuesta = await fetch('http://127.0.0.1:8000/api/predict/demand');
+      const API_URL = import.meta.env.VITE_API_URL;
+
+      const respuesta = await fetch(`${API_URL}/api/predict/demand`); 
       if (!respuesta.ok) {
         throw new Error('No se pudo conectar con la API de Machine Learning.');
       }
@@ -80,10 +85,14 @@ export default function PrediccionDemanda() {
       });
 
       setPredicciones(datosCombinados);
-    } catch {
-      setError(
-        'Error al conectar con el motor de IA. Verifica que el servidor Python (uvicorn) esté activo en el puerto 8000.'
-      );
+    } catch (err) {
+     console.error('Error al obtener predicciones:', err);
+
+     setError(
+      err instanceof Error
+      ? err.message
+      : 'No se pudo conectar con el servicio de predicción.'
+  );
     } finally {
       setCargando(false);
     }
