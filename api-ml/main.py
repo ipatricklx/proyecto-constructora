@@ -114,45 +114,49 @@ def predict_demand():
         precision_mat = None
 
         if meses_analizados >= 4:
-    # Reservar el último mes para evaluar la predicción
-         X_train = X.iloc[:-1]
-         y_train = y.iloc[:-1]
+            # Reservar el último mes para evaluar
+            X_train = X.iloc[:-1]
+            y_train = y.iloc[:-1]
 
-         X_test = X.iloc[-1:]
-         y_test = y.iloc[-1:]
+            X_test = X.iloc[-1:]
+            y_test = y.iloc[-1:]
 
-    modelo_evaluacion = LinearRegression()
-    modelo_evaluacion.fit(X_train, y_train)
+            modelo_evaluacion = LinearRegression()
+            modelo_evaluacion.fit(X_train, y_train)
 
-    y_pred_test = modelo_evaluacion.predict(X_test)
+            y_pred_test = modelo_evaluacion.predict(X_test)
 
-    mae_mat = round(
-        float(mean_absolute_error(y_test, y_pred_test)), 2
-    )
+            mae_mat = round(
+                float(mean_absolute_error(y_test, y_pred_test)), 2
+            )
 
-    rmse_mat = round(
-        float(np.sqrt(mean_squared_error(y_test, y_pred_test))), 2
-    )
+            rmse_mat = round(
+                float(np.sqrt(mean_squared_error(y_test, y_pred_test))), 2
+            )
 
-    suma_real = float(np.sum(y_test))
+            suma_real = float(np.sum(y_test))
 
-    if suma_real > 0:
-        wmape = (
-            float(np.sum(np.abs(y_test - y_pred_test)))
-            / suma_real
-        ) * 100
+            if suma_real > 0:
+                wmape = (
+                    float(np.sum(np.abs(y_test - y_pred_test)))
+                    / suma_real
+                ) * 100
 
-        precision_mat = max(
-            0.0, round(100.0 - wmape, 1)
-        )
+                precision_mat = max(
+                    0.0, round(100.0 - wmape, 1)
+                )
 
-        y_reales_global.extend(y_test.tolist())
-        y_pred_global.extend(y_pred_test.tolist())
+            y_reales_global.extend(y_test.tolist())
+            y_pred_global.extend(y_pred_test.tolist())
 
+        # Predicción del próximo mes usando todo el historial
         pendiente = float(modelo.coef_[0])
+
         mes_actual_idx = pd.Timestamp.now().to_period('M').ordinal
-        proximo_mes_df = pd.DataFrame({'mes_idx': [mes_actual_idx + 1]})
-        
+        proximo_mes_df = pd.DataFrame({
+            'mes_idx': [mes_actual_idx + 1]
+        })
+
         prediccion = modelo.predict(proximo_mes_df)[0]
         prediccion_final = max(0, round(float(prediccion)))
 
@@ -164,7 +168,10 @@ def predict_demand():
             tendencia = "Estable"
 
         variacion_pct = (
-            round(((prediccion_final - promedio_historico) / promedio_historico) * 100, 1)
+            round(
+                ((prediccion_final - promedio_historico)
+                / promedio_historico) * 100, 1
+            )
             if promedio_historico > 0 else 0.0
         )
 
@@ -181,6 +188,7 @@ def predict_demand():
             "rmse": rmse_mat,
             "precision_pct": precision_mat
         })
+
 
     # Calcular métricas globales del modelo
     if len(y_reales_global) >= 1:
