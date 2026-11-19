@@ -270,7 +270,11 @@ export default function SalidasAlmacen() {
                 historialFiltrado.map(mov => (
                   <tr key={mov.id} className={`hover:bg-gray-50 ${mov.estado === 'Anulada' ? 'opacity-60 bg-gray-50' : ''}`}>
                     <td className="px-5 py-3 font-bold text-gray-700">{mov.codigo_correlativo || mov.id.slice(0, 8)}</td>
-                    <td className="px-5 py-3">{new Date(mov.fecha_movimiento).toLocaleDateString()}</td>
+                    <td className="px-5 py-3">
+                      {mov.fecha_movimiento
+                        ? mov.fecha_movimiento.split('T')[0].split('-').reverse().join('/')
+                        : ''}
+                    </td>
                     <td className="px-5 py-3">{mov.proyectos?.nombre}</td>
                     <td className="px-5 py-3">{mov.usuario_responsable}</td>
                     <td className="px-5 py-3 text-center">{mov.detalle_movimientos?.length || 0}</td>

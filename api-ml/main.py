@@ -1,39 +1,75 @@
+
 import os
-from fastapi import FastAPI
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from dotenv import load_dotenv
+
 import pandas as pd
 import numpy as np
+
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 
-def predecir_demanda(metodo, historial):
+# ==========================================
+# FUNCIONES DE PREDICCIÓN
+# ==========================================
+
+def predecir_demanda(metodo, historial, pasos=1):
 
     historial = np.array(historial, dtype=float)
+    pasos = max(1, int(pasos))
+
+    if len(historial) == 0:
+        return 0.0
 
     if metodo == "Regresión Lineal (OLS)":
+
         X = np.arange(len(historial)).reshape(-1, 1)
+
         modelo = LinearRegression()
         modelo.fit(X, historial)
 
-        siguiente_mes = np.array([[len(historial)]])
+        siguiente_mes = np.array([
+            [len(historial) + pasos - 1]
+        ])
+
         prediccion = modelo.predict(siguiente_mes)[0]
 
     elif metodo == "Promedio móvil":
-        prediccion = np.mean(historial[-3:])
+
+        datos = list(historial)
+
+        for _ in range(pasos):
+            nueva_prediccion = float(np.mean(datos[-3:]))
+            datos.append(nueva_prediccion)
+
+        prediccion = datos[-1]
 
     elif metodo == "Último valor":
+
         prediccion = historial[-1]
 
-    return max(0, float(prediccion))
+    else:
+        prediccion = np.mean(historial[-3:])
+
+    return max(0.0, float(prediccion))
+
+
+# ==========================================
+# EVALUACIÓN DE ALGORITMOS
+# ==========================================
 
 def evaluar_metodo(metodo, historial, meses_prueba=3):
+
     reales = []
     predicciones = []
 
     for i in range(len(historial) - meses_prueba, len(historial)):
+
         datos_entrenamiento = historial[:i]
 
         prediccion = predecir_demanda(
@@ -74,9 +110,16 @@ def evaluar_metodo(metodo, historial, meses_prueba=3):
         "predicciones": predicciones.tolist()
     }
 
+
+# ==========================================
+# CONEXIÓN SUPABASE
+# ==========================================
+
 load_dotenv()
+
 url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")
+
 supabase: Client = create_client(url, key)
 
 app = FastAPI(title="ML Almacén API - HAKU")
@@ -94,129 +137,256 @@ app.add_middleware(
 )
 
 
+# ==========================================
+# ESTADO DE LA API
+# ==========================================
+
 @app.get("/")
 def health_check():
-    return {"status": "online", "mensaje": "API de Machine Learning activa"}
 
+    return {
+        "status": "online",
+        "mensaje": "API de Machine Learning activa"
+    }
+
+
+# ==========================================
+# PREDICCIÓN DE DEMANDA POR MES
+# ==========================================
 
 @app.get("/api/predict/demand")
-def predict_demand():
+def predict_demand(mes: Optional[str] = None):
 
-    # 1. Consultar movimientos normales completados
-    response = supabase.table("detalle_movimientos").select(
+    # 1. Determinar el mes solicitado
+
+    ahora_peru = pd.Timestamp.now(
+        tz="America/Lima"
+    ).tz_localize(None)
+
+    periodo_actual = ahora_peru.to_period("M")
+    periodo_siguiente = periodo_actual + 1
+
+    if mes is None:
+        periodo_objetivo = periodo_siguiente
+
+    else:
+
+        try:
+            periodo_objetivo = pd.Period(mes, freq="M")
+
+            if len(mes) != 7 or mes[4] != "-":
+                raise ValueError("Formato incorrecto")
+
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail="El mes debe tener el formato YYYY-MM."
+            )
+
+        if periodo_objetivo < periodo_siguiente:
+            raise HTTPException(
+                status_code=400,
+                detail="Solo se permiten consultar meses futuros."
+            )
+
+    inicio_mes_actual = periodo_actual.start_time
+
+    # Último mes completo disponible
+    periodo_base = periodo_actual - 1
+
+    # Cantidad de periodos entre la base y el objetivo
+    pasos_prediccion = (
+        periodo_objetivo.ordinal - periodo_base.ordinal
+    )
+
+    # ======================================
+    # 2. CONSULTAR MOVIMIENTOS OPERATIVOS
+    # ======================================
+
+    response = supabase.table(
+        "detalle_movimientos"
+    ).select(
         "cantidad, material_id, materiales(nombre), movimientos!inner(fecha_movimiento, tipo_movimiento, estado)"
-    ).eq("movimientos.tipo_movimiento", "SALIDA").eq(
+    ).eq(
+        "movimientos.tipo_movimiento", "SALIDA"
+    ).eq(
         "movimientos.estado", "Completada"
     ).execute()
 
-    # 2. Consultar salidas del historial simulado
+    # ======================================
+    # 3. CONSULTAR HISTORIAL SIMULADO
+    # ======================================
+
     historical_response = supabase.table(
         "movimientos_historicos_ml"
     ).select(
         "cantidad, material_id, fecha_movimiento, materiales(nombre)"
-    ).eq("tipo_movimiento", "SALIDA").execute()
+    ).eq(
+        "tipo_movimiento", "SALIDA"
+    ).execute()
 
-    # 3. Combinar los registros de ambas fuentes
+    # ======================================
+    # 4. COMBINAR LOS REGISTROS
+    # ======================================
+
     records = []
 
-    # Movimientos normales
     for row in response.data:
+
         records.append({
             "material_id": row["material_id"],
-            "nombre": row["materiales"]["nombre"] if row.get("materiales") else "Sin nombre",
+            "nombre": (
+                row["materiales"]["nombre"]
+                if row.get("materiales")
+                else "Sin nombre"
+            ),
             "cantidad": float(row["cantidad"]),
             "fecha": row["movimientos"]["fecha_movimiento"]
         })
 
-    # Historial simulado
     for row in historical_response.data:
+
         records.append({
             "material_id": row["material_id"],
-            "nombre": row["materiales"]["nombre"] if row.get("materiales") else "Sin nombre",
+            "nombre": (
+                row["materiales"]["nombre"]
+                if row.get("materiales")
+                else "Sin nombre"
+            ),
             "cantidad": float(row["cantidad"]),
             "fecha": row["fecha_movimiento"]
         })
 
-    # 4. Validar que existan registros
     if not records:
+
         return {
             "status": "error",
             "message": "No hay datos históricos suficientes para predecir."
         }
 
-    # 5. Preparar los datos para Machine Learning
+    # ======================================
+    # 5. PREPARAR EL HISTORIAL
+    # ======================================
+
     df = pd.DataFrame(records)
-    df['fecha'] = pd.to_datetime(df['fecha'], format='ISO8601')
 
-    # Identificar el primer día del mes actual
-    ahora_peru = pd.Timestamp.now(tz="America/Lima").tz_localize(None)
+    df["fecha"] = pd.to_datetime(
+        df["fecha"],
+        format="ISO8601"
+    )
 
-    inicio_mes_actual = ahora_peru.to_period("M").start_time
-    mes_actual_idx = ahora_peru.to_period("M").ordinal
-    
-    # Excluir movimientos del mes actual, todavía incompleto
-    df = df[df['fecha'].dt.tz_localize(None) < inicio_mes_actual].copy()
+    # Excluir el mes actual porque todavía está incompleto
+    df = df[
+        df["fecha"].dt.tz_localize(None) < inicio_mes_actual
+    ].copy()
 
-    # Obtener el índice mensual
-    df['mes_idx'] = df['fecha'].dt.tz_localize(None).dt.to_period('M').astype(int)
+    if df.empty:
 
+        return {
+            "status": "error",
+            "message": "No existen movimientos de meses completos para realizar la predicción."
+        }
+
+    df["mes_idx"] = (
+        df["fecha"]
+        .dt.tz_localize(None)
+        .dt.to_period("M")
+        .apply(lambda periodo: periodo.ordinal)
+    )
+
+    # ======================================
+    # 6. PROCESAR CADA MATERIAL
+    # ======================================
 
     resultados = []
-    materiales_unicos = df['material_id'].unique()
 
-    # Listas para métricas globales del modelo (solo materiales con >= 3 meses)
+    materiales_unicos = df["material_id"].unique()
+
     y_reales_global = []
     y_pred_global = []
 
     for mat_id in materiales_unicos:
-        df_mat = df[df['material_id'] == mat_id]
-        nombre_mat = df_mat['nombre'].iloc[0]
-        
+
+        df_mat = df[df["material_id"] == mat_id]
+
+        nombre_mat = df_mat["nombre"].iloc[0]
+
         demanda_mensual = (
-        df_mat.groupby('mes_idx')['cantidad']
-        .sum()
-        .sort_index()
-    )       
-    # Completar los meses sin despachos con demanda cero
+            df_mat.groupby("mes_idx")["cantidad"]
+            .sum()
+            .sort_index()
+        )
+
+        # Completar meses sin movimientos hasta
+        # el último mes completo disponible.
+
         todos_los_meses = range(
-        demanda_mensual.index.min(),
-        demanda_mensual.index.max() + 1
-    )   
+            int(demanda_mensual.index.min()),
+            periodo_base.ordinal + 1
+        )
+
         demanda_mensual = (
-        demanda_mensual
-        .reindex(todos_los_meses, fill_value=0)
-        .rename_axis('mes_idx')
-        .reset_index(name='cantidad')
-    )   
+            demanda_mensual
+            .reindex(todos_los_meses, fill_value=0)
+        )
+
         meses_analizados = int(len(demanda_mensual))
-        promedio_historico = round(float(demanda_mensual['cantidad'].mean()), 1)
-        
+
+        y = demanda_mensual.values.astype(float)
+
+        promedio_historico = round(
+            float(np.mean(y)),
+            1
+        )
+
+        # ==================================
+        # 7. HISTORIAL INSUFICIENTE
+        # ==================================
+
         if meses_analizados < 2:
-            prediccion_final = max(0, round(promedio_historico))
+
+            prediccion_final = max(
+                0,
+                round(promedio_historico)
+            )
+
             resultados.append({
+
                 "material_id": mat_id,
                 "nombre": nombre_mat,
+
                 "promedio_mensual": promedio_historico,
+
                 "prediccion_proximo_mes": prediccion_final,
+                "prediccion_mes_seleccionado": prediccion_final,
+
                 "tendencia": "Base inicial",
                 "variacion_pct": 0.0,
+
                 "meses_analizados": meses_analizados,
+
                 "confiabilidad": "Baja",
+
                 "mae": None,
                 "rmse": None,
                 "precision_pct": None,
+
                 "algoritmo_seleccionado": "Promedio móvil",
+
                 "evaluacion_disponible": False
+
             })
+
             continue
 
-        y = demanda_mensual['cantidad']
+        # ==================================
+        # 8. EVALUAR LOS ALGORITMOS
+        # ==================================
 
-        # Evaluación sobre historial (solo válido matemáticamente desde 3 meses)
-        # Evaluación temporal de varios meses
         mae_mat = None
         rmse_mat = None
         precision_mat = None
+
         algoritmo_seleccionado = "Sin evaluación"
 
         metodos = [
@@ -226,16 +396,17 @@ def predict_demand():
         ]
 
         if meses_analizados >= 6:
+
             evaluaciones = {}
 
             for metodo in metodos:
+
                 evaluaciones[metodo] = evaluar_metodo(
                     metodo,
-                    y.values,
+                    y,
                     meses_prueba=3
                 )
 
-            # Seleccionar el método con menor WMAPE
             metodos_validos = {
                 nombre: resultado
                 for nombre, resultado in evaluaciones.items()
@@ -243,16 +414,20 @@ def predict_demand():
             }
 
             if metodos_validos:
+
                 algoritmo_seleccionado = min(
                     metodos_validos,
                     key=lambda nombre: metodos_validos[nombre]["wmape"]
                 )
 
-                mejor_resultado = evaluaciones[algoritmo_seleccionado]
+                mejor_resultado = evaluaciones[
+                    algoritmo_seleccionado
+                ]
 
                 mae_mat = mejor_resultado["mae"]
                 rmse_mat = mejor_resultado["rmse"]
                 precision_mat = mejor_resultado["precision_pct"]
+
                 y_reales_global.extend(
                     mejor_resultado["reales"]
                 )
@@ -260,8 +435,11 @@ def predict_demand():
                 y_pred_global.extend(
                     mejor_resultado["predicciones"]
                 )
-        # Predicción del próximo mes usando todo el historial
-        # Predicción del próximo mes usando el método seleccionado
+
+        # ==================================
+        # 9. PREDECIR EL MES SOLICITADO
+        # ==================================
+
         metodo_final = algoritmo_seleccionado
 
         if metodo_final == "Sin evaluación":
@@ -269,76 +447,179 @@ def predict_demand():
 
         prediccion = predecir_demanda(
             metodo_final,
-            y.values
+            y,
+            pasos=pasos_prediccion
         )
 
-        prediccion_final = max(0, round(float(prediccion)))
+        prediccion_final = max(
+            0,
+            round(float(prediccion))
+        )
 
-        # Tendencia basada en la evolución del historial
-        # Variación de la predicción respecto al promedio histórico
+        # ==================================
+        # 10. CALCULAR TENDENCIA
+        # ==================================
+
         variacion_pct = (
+
             round(
-                ((prediccion_final - promedio_historico)
-                / promedio_historico) * 100, 1
+                (
+                    (prediccion_final - promedio_historico)
+                    / promedio_historico
+                ) * 100,
+                1
             )
-            if promedio_historico > 0 else 0.0
+
+            if promedio_historico > 0
+            else 0.0
         )
 
-        # Tendencia coherente con la variación proyectada
         if variacion_pct > 5:
             tendencia = "En alza"
+
         elif variacion_pct < -5:
             tendencia = "A la baja"
+
         else:
             tendencia = "Estable"
 
+        # ==================================
+        # 11. CONFIABILIDAD
+        # ==================================
+
+        if (
+            meses_analizados >= 12
+            and precision_mat is not None
+            and precision_mat >= 75
+        ):
+            confiabilidad = "Alta"
+
+        elif (
+            meses_analizados >= 9
+            and precision_mat is not None
+            and precision_mat >= 50
+        ):
+            confiabilidad = "Media"
+
+        else:
+            confiabilidad = "Baja"
+
+        # ==================================
+        # 12. GUARDAR RESULTADO
+        # ==================================
+
         resultados.append({
+
             "material_id": mat_id,
             "nombre": nombre_mat,
+
             "promedio_mensual": promedio_historico,
+
+            # Se conserva el campo anterior para
+            # mantener compatibilidad con el frontend.
+
             "prediccion_proximo_mes": prediccion_final,
+
+            "prediccion_mes_seleccionado": prediccion_final,
+
             "tendencia": tendencia,
             "variacion_pct": variacion_pct,
+
             "meses_analizados": meses_analizados,
-            "confiabilidad": (
-                "Alta" if meses_analizados >= 12 and precision_mat is not None and precision_mat >= 75
-                else "Media" if meses_analizados >= 9 and precision_mat is not None and precision_mat >= 50
-                else "Baja"
-            ),
+
+            "confiabilidad": confiabilidad,
+
             "mae": mae_mat,
             "rmse": rmse_mat,
             "precision_pct": precision_mat,
+
             "algoritmo_seleccionado": metodo_final,
-            "evaluacion_disponible": meses_analizados >= 6 and precision_mat is not None
-            
+
+            "evaluacion_disponible": (
+                meses_analizados >= 6
+                and precision_mat is not None
+            )
+
         })
 
+    # ======================================
+    # 13. MÉTRICAS GLOBALES
+    # ======================================
 
-    # Calcular métricas globales del modelo
     if len(y_reales_global) >= 1:
+
         y_r = np.array(y_reales_global)
         y_p = np.array(y_pred_global)
-        mae_global = round(float(mean_absolute_error(y_r, y_p)), 2)
-        rmse_global = round(float(np.sqrt(mean_squared_error(y_r, y_p))), 2)
-        wmape_global = (float(np.sum(np.abs(y_r - y_p))) / float(np.sum(y_r))) * 100 if np.sum(y_r) > 0 else 0.0
-        precision_global = max(0.0, round(100.0 - wmape_global, 1))
-        calibrado = False
+
+        mae_global = round(
+            float(mean_absolute_error(y_r, y_p)),
+            2
+        )
+
+        rmse_global = round(
+            float(np.sqrt(mean_squared_error(y_r, y_p))),
+            2
+        )
+
+        wmape_global = (
+
+            float(np.sum(np.abs(y_r - y_p)))
+            / float(np.sum(y_r)) * 100
+
+            if np.sum(y_r) > 0
+            else 0.0
+        )
+
+        precision_global = max(
+            0.0,
+            round(100.0 - wmape_global, 1)
+        )
+
     else:
+
         mae_global = None
         rmse_global = None
         precision_global = None
-        calibrado = False
 
-    resultados.sort(key=lambda x: x["prediccion_proximo_mes"], reverse=True)
-    
+    calibrado = False
+
+    # ======================================
+    # 14. ORDENAR RESULTADOS
+    # ======================================
+
+    resultados.sort(
+        key=lambda x: x["prediccion_mes_seleccionado"],
+        reverse=True
+    )
+
+    # ======================================
+    # 15. RESPUESTA API
+    # ======================================
+
     return {
+
         "status": "success",
+
+        "mes_objetivo": str(periodo_objetivo),
+
+        "mes_base": str(periodo_base),
+
+        "meses_hasta_prediccion": pasos_prediccion,
+
         "metricas_modelo": {
+
             "calibrado": calibrado,
+
             "precision_global_pct": precision_global,
+
             "mae_global": mae_global,
+
             "rmse_global": rmse_global,
+
             "algoritmo": "Selección automática por material (menor WMAPE)"
+
         },
+
         "data": resultados
+
     }
