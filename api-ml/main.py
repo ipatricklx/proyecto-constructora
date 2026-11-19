@@ -83,8 +83,11 @@ def predict_demand():
     df['fecha'] = pd.to_datetime(df['fecha'], format='ISO8601')
 
     # Identificar el primer día del mes actual
-    inicio_mes_actual = pd.Timestamp.now().to_period('M').start_time
+    ahora_peru = pd.Timestamp.now(tz="America/Lima").tz_localize(None)
 
+    inicio_mes_actual = ahora_peru.to_period("M").start_time
+    mes_actual_idx = ahora_peru.to_period("M").ordinal
+    
     # Excluir movimientos del mes actual, todavía incompleto
     df = df[df['fecha'].dt.tz_localize(None) < inicio_mes_actual].copy()
 
@@ -200,9 +203,7 @@ def predict_demand():
 
         # Predicción del próximo mes usando todo el historial
         pendiente = float(modelo.coef_[0])
-        
 
-        mes_actual_idx = pd.Timestamp.now().to_period('M').ordinal
         proximo_mes_df = pd.DataFrame({
             'mes_idx': [mes_actual_idx + 1]
         })
