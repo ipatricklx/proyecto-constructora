@@ -32,28 +32,65 @@ app.add_middleware(
 def health_check():
     return {"status": "online", "mensaje": "API de Machine Learning activa"}
 
+
 @app.get("/api/predict/demand")
 def predict_demand():
+
+    # 1. Consultar movimientos normales completados
     response = supabase.table("detalle_movimientos").select(
-    "cantidad, material_id, materiales(nombre), movimientos!inner(fecha_movimiento, tipo_movimiento, estado)"
-    ).eq("movimientos.tipo_movimiento", "SALIDA").eq("movimientos.estado", "Completada").execute()
+        "cantidad, material_id, materiales(nombre), movimientos!inner(fecha_movimiento, tipo_movimiento, estado)"
+    ).eq("movimientos.tipo_movimiento", "SALIDA").eq(
+        "movimientos.estado", "Completada"
+    ).execute()
 
-    data = response.data
-    if not data:
-        return {"status": "error", "message": "No hay datos históricos suficientes para predecir."}
+    # 2. Consultar salidas del historial simulado
+    historical_response = supabase.table(
+        "movimientos_historicos_ml"
+    ).select(
+        "cantidad, material_id, fecha_movimiento, materiales(nombre)"
+    ).eq("tipo_movimiento", "SALIDA").execute()
 
+    # 3. Combinar los registros de ambas fuentes
     records = []
-    for row in data:
+
+    # Movimientos normales
+    for row in response.data:
         records.append({
             "material_id": row["material_id"],
             "nombre": row["materiales"]["nombre"] if row.get("materiales") else "Sin nombre",
             "cantidad": float(row["cantidad"]),
             "fecha": row["movimientos"]["fecha_movimiento"]
         })
-    
+
+    # Historial simulado
+    for row in historical_response.data:
+        records.append({
+            "material_id": row["material_id"],
+            "nombre": row["materiales"]["nombre"] if row.get("materiales") else "Sin nombre",
+            "cantidad": float(row["cantidad"]),
+            "fecha": row["fecha_movimiento"]
+        })
+
+    # 4. Validar que existan registros
+    if not records:
+        return {
+            "status": "error",
+            "message": "No hay datos históricos suficientes para predecir."
+        }
+
+    # 5. Preparar los datos para Machine Learning
     df = pd.DataFrame(records)
     df['fecha'] = pd.to_datetime(df['fecha'], format='ISO8601')
+
+    # Identificar el primer día del mes actual
+    inicio_mes_actual = pd.Timestamp.now().to_period('M').start_time
+
+    # Excluir movimientos del mes actual, todavía incompleto
+    df = df[df['fecha'].dt.tz_localize(None) < inicio_mes_actual].copy()
+
+    # Obtener el índice mensual
     df['mes_idx'] = df['fecha'].dt.tz_localize(None).dt.to_period('M').astype(int)
+
 
     resultados = []
     materiales_unicos = df['material_id'].unique()
@@ -109,48 +146,61 @@ def predict_demand():
         modelo.fit(X, y)
 
         # Evaluación sobre historial (solo válido matemáticamente desde 3 meses)
+        # Evaluación temporal de varios meses
         mae_mat = None
         rmse_mat = None
         precision_mat = None
 
-        if meses_analizados >= 4:
-            # Reservar el último mes para evaluar
-            X_train = X.iloc[:-1]
-            y_train = y.iloc[:-1]
+        if meses_analizados >= 6:
+            y_reales_test = []
+            y_pred_test = []
 
-            X_test = X.iloc[-1:]
-            y_test = y.iloc[-1:]
+            # Reservar los últimos 3 meses para evaluación
+            meses_prueba = 3
 
-            modelo_evaluacion = LinearRegression()
-            modelo_evaluacion.fit(X_train, y_train)
+            for i in range(meses_analizados - meses_prueba, meses_analizados):
+                X_train = X.iloc[:i]
+                y_train = y.iloc[:i]
 
-            y_pred_test = modelo_evaluacion.predict(X_test)
+                X_test = X.iloc[i:i+1]
+                y_test = y.iloc[i:i+1]
 
+                modelo_evaluacion = LinearRegression()
+                modelo_evaluacion.fit(X_train, y_train)
+
+                prediccion_test = modelo_evaluacion.predict(X_test)[0]
+
+                y_reales_test.append(float(y_test.iloc[0]))
+                y_pred_test.append(float(prediccion_test))
+
+            # Calcular métricas del material
             mae_mat = round(
-                float(mean_absolute_error(y_test, y_pred_test)), 2
+                float(mean_absolute_error(y_reales_test, y_pred_test)), 2
             )
 
             rmse_mat = round(
-                float(np.sqrt(mean_squared_error(y_test, y_pred_test))), 2
+                float(np.sqrt(mean_squared_error(y_reales_test, y_pred_test))), 2
             )
 
-            suma_real = float(np.sum(y_test))
+            suma_real = float(np.sum(y_reales_test))
 
             if suma_real > 0:
                 wmape = (
-                    float(np.sum(np.abs(y_test - y_pred_test)))
-                    / suma_real
+                    float(np.sum(np.abs(
+                        np.array(y_reales_test) - np.array(y_pred_test)
+                    ))) / suma_real
                 ) * 100
 
                 precision_mat = max(
                     0.0, round(100.0 - wmape, 1)
                 )
 
-            y_reales_global.extend(y_test.tolist())
-            y_pred_global.extend(y_pred_test.tolist())
+            y_reales_global.extend(y_reales_test)
+            y_pred_global.extend(y_pred_test)
 
         # Predicción del próximo mes usando todo el historial
         pendiente = float(modelo.coef_[0])
+        
 
         mes_actual_idx = pd.Timestamp.now().to_period('M').ordinal
         proximo_mes_df = pd.DataFrame({
@@ -183,7 +233,11 @@ def predict_demand():
             "tendencia": tendencia,
             "variacion_pct": variacion_pct,
             "meses_analizados": meses_analizados,
-            "confiabilidad": "Preliminar" if meses_analizados >= 4 else "Baja",
+            "confiabilidad": (
+                "Alta" if meses_analizados >= 12 and precision_mat is not None and precision_mat >= 75
+                else "Media" if meses_analizados >= 9 and precision_mat is not None and precision_mat >= 50
+                else "Baja"
+            ),
             "mae": mae_mat,
             "rmse": rmse_mat,
             "precision_pct": precision_mat
