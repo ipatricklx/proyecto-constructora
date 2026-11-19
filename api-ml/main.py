@@ -8,6 +8,72 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
+
+def predecir_demanda(metodo, historial):
+
+    historial = np.array(historial, dtype=float)
+
+    if metodo == "Regresión Lineal (OLS)":
+        X = np.arange(len(historial)).reshape(-1, 1)
+        modelo = LinearRegression()
+        modelo.fit(X, historial)
+
+        siguiente_mes = np.array([[len(historial)]])
+        prediccion = modelo.predict(siguiente_mes)[0]
+
+    elif metodo == "Promedio móvil":
+        prediccion = np.mean(historial[-3:])
+
+    elif metodo == "Último valor":
+        prediccion = historial[-1]
+
+    return max(0, float(prediccion))
+
+def evaluar_metodo(metodo, historial, meses_prueba=3):
+    reales = []
+    predicciones = []
+
+    for i in range(len(historial) - meses_prueba, len(historial)):
+        datos_entrenamiento = historial[:i]
+
+        prediccion = predecir_demanda(
+            metodo,
+            datos_entrenamiento
+        )
+
+        reales.append(float(historial[i]))
+        predicciones.append(float(prediccion))
+
+    reales = np.array(reales)
+    predicciones = np.array(predicciones)
+
+    mae = mean_absolute_error(reales, predicciones)
+
+    rmse = np.sqrt(
+        mean_squared_error(reales, predicciones)
+    )
+
+    suma_real = np.sum(reales)
+
+    wmape = (
+        np.sum(np.abs(reales - predicciones)) / suma_real * 100
+        if suma_real > 0 else None
+    )
+
+    precision = (
+        max(0.0, 100.0 - wmape)
+        if wmape is not None else None
+    )
+
+    return {
+        "mae": round(float(mae), 2),
+        "rmse": round(float(rmse), 2),
+        "wmape": round(float(wmape), 2) if wmape is not None else None,
+        "precision_pct": round(float(precision), 1) if precision is not None else None,
+        "reales": reales.tolist(),
+        "predicciones": predicciones.tolist()
+    }
+
 load_dotenv()
 url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")
@@ -138,86 +204,78 @@ def predict_demand():
                 "confiabilidad": "Baja",
                 "mae": None,
                 "rmse": None,
-                "precision_pct": None
+                "precision_pct": None,
+                "algoritmo_seleccionado": "Promedio móvil",
+                "evaluacion_disponible": False
             })
             continue
 
-        X = demanda_mensual[['mes_idx']]
         y = demanda_mensual['cantidad']
-
-        modelo = LinearRegression()
-        modelo.fit(X, y)
 
         # Evaluación sobre historial (solo válido matemáticamente desde 3 meses)
         # Evaluación temporal de varios meses
         mae_mat = None
         rmse_mat = None
         precision_mat = None
+        algoritmo_seleccionado = "Sin evaluación"
+
+        metodos = [
+            "Regresión Lineal (OLS)",
+            "Promedio móvil",
+            "Último valor"
+        ]
 
         if meses_analizados >= 6:
-            y_reales_test = []
-            y_pred_test = []
+            evaluaciones = {}
 
-            # Reservar los últimos 3 meses para evaluación
-            meses_prueba = 3
-
-            for i in range(meses_analizados - meses_prueba, meses_analizados):
-                X_train = X.iloc[:i]
-                y_train = y.iloc[:i]
-
-                X_test = X.iloc[i:i+1]
-                y_test = y.iloc[i:i+1]
-
-                modelo_evaluacion = LinearRegression()
-                modelo_evaluacion.fit(X_train, y_train)
-
-                prediccion_test = modelo_evaluacion.predict(X_test)[0]
-
-                y_reales_test.append(float(y_test.iloc[0]))
-                y_pred_test.append(float(prediccion_test))
-
-            # Calcular métricas del material
-            mae_mat = round(
-                float(mean_absolute_error(y_reales_test, y_pred_test)), 2
-            )
-
-            rmse_mat = round(
-                float(np.sqrt(mean_squared_error(y_reales_test, y_pred_test))), 2
-            )
-
-            suma_real = float(np.sum(y_reales_test))
-
-            if suma_real > 0:
-                wmape = (
-                    float(np.sum(np.abs(
-                        np.array(y_reales_test) - np.array(y_pred_test)
-                    ))) / suma_real
-                ) * 100
-
-                precision_mat = max(
-                    0.0, round(100.0 - wmape, 1)
+            for metodo in metodos:
+                evaluaciones[metodo] = evaluar_metodo(
+                    metodo,
+                    y.values,
+                    meses_prueba=3
                 )
 
-            y_reales_global.extend(y_reales_test)
-            y_pred_global.extend(y_pred_test)
+            # Seleccionar el método con menor WMAPE
+            metodos_validos = {
+                nombre: resultado
+                for nombre, resultado in evaluaciones.items()
+                if resultado["wmape"] is not None
+            }
 
+            if metodos_validos:
+                algoritmo_seleccionado = min(
+                    metodos_validos,
+                    key=lambda nombre: metodos_validos[nombre]["wmape"]
+                )
+
+                mejor_resultado = evaluaciones[algoritmo_seleccionado]
+
+                mae_mat = mejor_resultado["mae"]
+                rmse_mat = mejor_resultado["rmse"]
+                precision_mat = mejor_resultado["precision_pct"]
+                y_reales_global.extend(
+                    mejor_resultado["reales"]
+                )
+
+                y_pred_global.extend(
+                    mejor_resultado["predicciones"]
+                )
         # Predicción del próximo mes usando todo el historial
-        pendiente = float(modelo.coef_[0])
+        # Predicción del próximo mes usando el método seleccionado
+        metodo_final = algoritmo_seleccionado
 
-        proximo_mes_df = pd.DataFrame({
-            'mes_idx': [mes_actual_idx + 1]
-        })
+        if metodo_final == "Sin evaluación":
+            metodo_final = "Promedio móvil"
 
-        prediccion = modelo.predict(proximo_mes_df)[0]
+        prediccion = predecir_demanda(
+            metodo_final,
+            y.values
+        )
+
         prediccion_final = max(0, round(float(prediccion)))
 
-        if pendiente > 0.5:
-            tendencia = "En alza"
-        elif pendiente < -0.5:
-            tendencia = "A la baja"
-        else:
-            tendencia = "Estable"
-
+        # Tendencia basada en la evolución del historial
+        # Variación de la predicción respecto al promedio histórico
         variacion_pct = (
             round(
                 ((prediccion_final - promedio_historico)
@@ -225,6 +283,14 @@ def predict_demand():
             )
             if promedio_historico > 0 else 0.0
         )
+
+        # Tendencia coherente con la variación proyectada
+        if variacion_pct > 5:
+            tendencia = "En alza"
+        elif variacion_pct < -5:
+            tendencia = "A la baja"
+        else:
+            tendencia = "Estable"
 
         resultados.append({
             "material_id": mat_id,
@@ -241,7 +307,10 @@ def predict_demand():
             ),
             "mae": mae_mat,
             "rmse": rmse_mat,
-            "precision_pct": precision_mat
+            "precision_pct": precision_mat,
+            "algoritmo_seleccionado": metodo_final,
+            "evaluacion_disponible": meses_analizados >= 6 and precision_mat is not None
+            
         })
 
 
@@ -269,7 +338,7 @@ def predict_demand():
             "precision_global_pct": precision_global,
             "mae_global": mae_global,
             "rmse_global": rmse_global,
-            "algoritmo": "Regresión Lineal (OLS)"
+            "algoritmo": "Selección automática por material (menor WMAPE)"
         },
         "data": resultados
     }
